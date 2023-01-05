@@ -3,12 +3,13 @@ from sigma.rule import SigmaRule, SigmaDetectionItem
 from sigma.conversion.base import TextQueryBackend
 from sigma.conditions import ConditionItem, ConditionAND, ConditionOR, ConditionNOT, ConditionFieldEqualsValueExpression, ConditionValueExpression
 from sigma.types import SigmaCompareExpression, SigmaString, SigmaNumber
-from sigma.pipelines.sumologic import sumologic# TODO: add pipeline imports or delete this line
+#from sigma.pipelines.sumologic import sumologic# TODO: add pipeline imports or delete this line
 from sigma.conversion.deferred import DeferredQueryExpression, DeferredTextQueryExpression
 import sigma
 import re
 import json
 from typing import ClassVar, Dict, Tuple, Pattern, List, Any, Union
+from sigma.backends.sumologic.parsing import parsing_statement_config
 
 class SumoLogicSingleDeferredKeywordExpression(DeferredTextQueryExpression):
     template = '{op}"{value}"'
@@ -102,8 +103,10 @@ class sumologicCIPBackend(TextQueryBackend):
         SigmaCompareExpression.CompareOperators.GTE : ">=",
     }
 
-    # null expression
-    field_null_expression : ClassVar[str] = "isNull({field})"          # Expression for field has null value as format string with {field} placeholder for field name
+    # null, blank, and empty expressions
+    field_null_expression : ClassVar[str] = "isNull({field})" # value is null
+    field_blank_expression : ClassVar[str] = "isBlank({field})" # value is null, empty, or contains only whitespace characters
+    field_empty_expression : ClassVar[str] = "isEmpty({field})" # value is an empty string containing no characters or whitespace
 
     # field value in list
     convert_or_as_in : ClassVar[bool] = True                     # Convert OR as in-expression
@@ -120,13 +123,6 @@ class sumologicCIPBackend(TextQueryBackend):
     # keyword search expressions
     unbound_value_str_expression : ClassVar[str] = "{value}"   # Expression for string value not bound to a field as format string with placeholder {value}
     unbound_value_num_expression : ClassVar[str] = "{value}"   # Expression for number value not bound to a field as format string with placeholder {value}
-    unbound_value_re_expression : ClassVar[str] = '_=~{value}'    # Expression for regular expression not bound to a field as format string with placeholder {value}
-    
-
-    # Query finalization: appending and concatenating deferred query part
-##    deferred_start : ClassVar[str] = "\n| "               # String used as separator between main query and deferred parts
-##    deferred_separator : ClassVar[str] = "\n| "           # String used to join multiple deferred query parts
-    deferred_only_query : ClassVar[str] = "*"            # String used as query if final query only contains deferred expression
     
     def get_quote_type(self, val):
         """Returns the shortest correct quote type (none, single, double, or trip) based on quote characters contained within an input value"""
@@ -166,9 +162,9 @@ class sumologicCIPBackend(TextQueryBackend):
         vals = [str(arg.value.to_plain() or "") for arg in cond.args]
         test_val = vals[0]
         vals_no_wc = [val.rstrip(self.wildcard_multi).lstrip(self.wildcard_multi) for val in vals]
-        vals_formatted = self.list_separator.join([self.get_quote_type(v) + v.lower() + self.get_quote_type(v) if isinstance(v, str) else str(v) for v in vals_no_wc])
         escaped_vals = [re.escape(val).replace("/", "\\/") for val in vals_no_wc]
-        
+        vals_formatted2 = self.list_separator.join([self.get_quote_type(v) + v.lower() + self.get_quote_type(v) if isinstance(v, str) else str(v) for v in escaped_vals])
+                
         # or-in condition
         if isinstance(cond, ConditionOR):
             # contains any
@@ -184,7 +180,12 @@ class sumologicCIPBackend(TextQueryBackend):
             else:
                 if any(isinstance(arg.value, SigmaString) for arg in args):
                     field=self.to_lower_case_expression.format(field=self.escape_and_quote_field(cond.args[0].field))
-                result = self.field_in_list_expression.format(field=field, op=self.or_in_operator, list=vals_formatted)
+                # event IDs must have quotes
+                if field == "event_id":
+                    vals = vals_formatted2
+                else:
+                    vals = self.list_separator.join([self.convert_value_str(arg.value, state).lower() if isinstance(arg.value, SigmaString) else str(arg.value) for arg in cond.args])
+                result = self.field_in_list_expression.format(field=field, op=self.or_in_operator, list=vals)
         else:
             # contains all
             result = self.generate_contains_all_exp(field, escaped_vals)
@@ -194,7 +195,7 @@ class sumologicCIPBackend(TextQueryBackend):
     def convert_condition_and(self, cond : ConditionAND, state : ConversionState) -> Union[str, DeferredQueryExpression]:
         """Conversion of AND conditions."""
         try:
-            if self.token_separator == self.and_token:   # don't repeat the same thing triple times if separator equals and token
+            if self.token_separator == self.and_token:
                 joiner = self.and_token
             else:
                 joiner = self.token_separator + self.and_token + self.token_separator
@@ -210,9 +211,11 @@ class sumologicCIPBackend(TextQueryBackend):
                  ))
 
             if isinstance(cond.args[0], ConditionValueExpression):
-                vals = [self.convert_value_str(arg.value, state) for arg in cond.args]
+                try:
+                    vals = [self.convert_value_str(arg.value, state) for arg in cond.args]
+                except:
+                    vals = [self.str_quote + str(arg.value) + self.str_quote for arg in cond.args]
                 result = joiner.join(vals)
-                #return self.group_expression.format(expr=result)
                 return SumoLogicMultiDeferredKeywordExpression(state, "", self.group_expression.format(expr=result))
             else:
                 if result.endswith(joiner):
@@ -239,9 +242,11 @@ class sumologicCIPBackend(TextQueryBackend):
                      if converted is not None and not isinstance(converted, DeferredQueryExpression)
                  ))
             if isinstance(cond.args[0], ConditionValueExpression):
-                vals = [self.convert_value_str(arg.value, state) for arg in cond.args]
+                try:
+                    vals = [self.convert_value_str(arg.value, state) for arg in cond.args]
+                except:
+                    vals = [self.str_quote + str(arg.value) + self.str_quote for arg in cond.args]
                 result = joiner.join(vals)
-                #return self.group_expression.format(expr=result)
                 return SumoLogicMultiDeferredKeywordExpression(state, "", self.group_expression.format(expr=result))
             else:
                 if result.endswith(joiner):
@@ -262,6 +267,8 @@ class sumologicCIPBackend(TextQueryBackend):
         elif test_val.endswith(self.wildcard_multi) or test_val.startswith(self.wildcard_multi):
             result = self.to_lower_case_expression.format(field=cond.field) + self.token_separator + self.matches + self.token_separator + val
         # plain equals
+        elif test_val.strip() == "":
+            result = self.field_blank_expression.format(field=cond.field)
         else:
             result = self.to_lower_case_expression.format(field=cond.field) + self.token_separator + self.eq_token + self.token_separator + val
 
@@ -298,14 +305,19 @@ class sumologicCIPBackend(TextQueryBackend):
             elif isinstance(arg, ConditionFieldEqualsValueExpression):
                 raw_val = cond.args[0].value
                 if isinstance(raw_val, SigmaString):
+                    test_val = raw_val.to_plain().lower()
                     val = self.convert_value_str(raw_val, state).lower()
+                    # set field value
                     if type(val) == str:
                         field = self.to_lower_case_expression.format(field=arg.field)
                         val = val.lower()
                     else:
                         field = arg.field
+                    # field is not blank or empty
+                    if test_val.strip() == "":
+                        result = self.not_token + self.field_blank_expression.format(field=arg.field)
                     # field does not start with, end with, or contain
-                    if raw_val[0] == self.wildcard_multi or raw_val[-1] == self.wildcard_multi:
+                    elif raw_val[0] == self.wildcard_multi or raw_val[-1] == self.wildcard_multi:
                         exp = field + self.token_separator + self.matches + self.token_separator + val
                         result = self.not_expression.format(expression=exp)
                     else:
@@ -353,19 +365,80 @@ class sumologicCIPBackend(TextQueryBackend):
 
     def convert_condition_val_str(self, cond : ConditionValueExpression, state : "sigma.conversion.state.ConversionState") -> SumoLogicSingleDeferredKeywordExpression:
         """Conversion of value-only strings."""
-        # to do: figure out how to implement "NOT" option for these
         if isinstance(cond.parent, SigmaDetectionItem):
-            return SumoLogicSingleDeferredKeywordExpression(state, "", cond.value)
+            return SumoLogicSingleDeferredKeywordExpression(state, "", cond.value).postprocess(None, cond)
 
     def convert_condition_val_num(self, cond : ConditionValueExpression, state : ConversionState) -> Union[str, DeferredQueryExpression]:
         """Conversion of value-only numbers."""
         return self.unbound_value_num_expression.format(value=cond.value)
 
     def get_source_category(self, rule: SigmaRule, state: ConversionState) -> Any:
-        """Retrieve the user-defined source category definition"""
-        source_category_mappings = {}
+        """Create source category definition based on taxonomy https://github.com/SigmaHQ/sigma-specification/blob/main/Taxonomy_1_3_1.md"""
+        # extract logsource components
+        category = rule.logsource.category
+        product = rule.logsource.product
+        service = rule.logsource.service
+
+        # add a cloud category if missing
+        if not category and product in [
+            "aws",
+            "azure",
+            "gcp",
+            "google_workspace",
+            "m365",
+            "okta",
+            "onelogin"
+        ]:
+            category = "cloudinfrastructure"
+
+        # add an OS category
+        if product in [
+            "windows",
+            "linux",
+            "macos"
+        ]:
+            # set sysmon as service
+            if product != "macos" and category in [
+                "network_connection",
+                "process_creation",
+                "clipboard_capture",
+                "create_remote_thread",
+                "create_stream_hash",
+                "dns_query",
+                "file_change",
+                "file_delete",
+                "file_event",
+                "image_load",
+                "network_connection",
+                "pipe_created",
+                "process_access",
+                "process_tampering",
+                "process_termination",
+                "raw_access_thread",
+                "registry_add",
+                "registry_delete",
+                "registry_event",
+                "registry_rename",
+                "registry_set",
+                "sysmon_error",
+                "sysmon_status",
+                "wmi_event"
+            ]:
+                service = "sysmon"
+            category = "os"
+
+        # add network category
+        if category in ["dns", "firewall", "proxy", "webserver"]:
+            product = category
+            category = "network"
+        if product == "zeek":
+            category = "network"
+
+        components = [category, product, service]
+        populated_components = [item for item in components if item]
+        result = "/" + "/".join(populated_components)
         
-        return "/example/src/category"
+        return result
 
     def get_all_fields_from_rule(self, rule: SigmaRule) -> list:
         """Lists all fields (both the fields attribute and the fields used in selection queries) so they can be displayed in the query"""
@@ -374,37 +447,77 @@ class sumologicCIPBackend(TextQueryBackend):
         if "fields" in rule_dict.keys():
             fields.extend(rule_dict["fields"])
 
-        detections = rule.detection.detections
-        for item in detections.items():
-            detection_items = item[1].detection_items
-            detection_fields = [detection_item.field for detection_item in detection_items if detection_item.field]
-            fields.extend(detection_fields)
+        selections = [item[1] for item in rule_dict["detection"].items() if isinstance(item[1], dict)]
+        for selection in selections:
+            keys = list(selection.keys())
+            for key in keys:
+                fields.append(key.split("|")[0])
 
-        if len(fields) > 0:
-            return list(set(fields))
+        unique_fields = list(set(fields))
+
+        return unique_fields
+
+    def get_all_fields_from_rule_new(self, rule: SigmaRule) -> dict:
+        """Lists all fields (both the fields attribute and the fields used in selection queries) so they can be displayed in the query"""
+        detection_fields = list(set(re.findall("(?<=field=)\'(.*?)'", str(rule.detection.detections))))
+        reference_fields = rule.fields
+        result = {
+            "detection_fields": detection_fields,
+            "reference_fields": rule.fields
+        }
+
+        return result
+
+    def get_parsing_statements(self, rule: SigmaRule) -> list:
+        "Lists all applicable parsing statements that should be added to the output query"
+        parsing_statements = []
+        rule_fields = self.get_all_fields_from_rule_new(rule)["detection_fields"]
+        field_mappings = [item for item in rule.applied_processing_items if item.endswith("fieldmapping")]
+        for fm in field_mappings:
+            parsing_statements_dict = parsing_statement_config[fm]
+            for field in rule_fields:
+                if field in parsing_statements_dict.keys():
+                    parsing_statements.append(parsing_statements_dict[field])
+
+        if len(parsing_statements) > 0:
+            return parsing_statements
         else:
             return None
+        
 
     def finalize_query(self, rule : SigmaRule, query : Union[str, DeferredQueryExpression], index : int, state : ConversionState, output_format : str) -> Union[str, DeferredQueryExpression]:
         """
         Finalize query by appending deferred query parts to the main conversion result as specified
         with deferred_start and deferred_separator.
         """
-        rule_fields = self.get_all_fields_from_rule(rule)
+        rule_fields = self.get_all_fields_from_rule_new(rule)["detection_fields"]
         source_category = self.get_source_category(rule, state)
+        parsing_statements = self.get_parsing_statements(rule)
+        # add scope/keywords
         scope = "//Category and Keyword Definition\n_sourceCategory={source_category}".format(source_category=source_category)
         if state.has_deferred():
             for exp in state.deferred:
                 scope += self.token_separator + exp.finalize_expression()
-        if query != "":
+            # reset conversion state
+            state = ConversionState(deferred=[], processing_state={})
+
+        # add parsing statements
+        if parsing_statements:
+            parsing_section = "\n\n//Parsing Statements\n" + "\n".join(parsing_statements)
+        else:
+            parsing_section = ""
+
+        # add query
+        if query != "" and isinstance(query, str):
             where_clause = "\n\n//Selection Query\n| where " + query
         else:
             where_clause = ""
+
+        # add display fields in table format
         fields = "\n\n//Display Fields\n| fields " + ", ".join(rule_fields) if rule_fields else ""
 
-        finalized_query = scope + where_clause + fields
-        
-        #return finalized_query
+        finalized_query = scope + parsing_section + where_clause + fields
+
         return super().finalize_query(rule, finalized_query, index, state, output_format)
 
     def finalize_query_saved_search(self, rule : SigmaRule, query : Union[str, DeferredQueryExpression], index : int, state : ConversionState) -> Union[str, DeferredQueryExpression]:
@@ -427,12 +540,11 @@ class sumologicCIPBackend(TextQueryBackend):
             "description": description
         }
 
-        result = json.dumps(saved_search)
+        result = json.dumps(saved_search, indent=4)
 
         return result
     
     def finalize_output_saved_search(self, queries: List[str]) -> List[str]:
-        print("hi")
         return self.finalize_output_default(queries)
     
 
