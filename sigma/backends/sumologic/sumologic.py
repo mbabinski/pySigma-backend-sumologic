@@ -1,13 +1,14 @@
-from sigma.conversion.state import ConversionState
-from sigma.rule import SigmaRule, SigmaDetectionItem
-from sigma.conversion.base import TextQueryBackend
-from sigma.conditions import ConditionItem, ConditionAND, ConditionOR, ConditionNOT, ConditionFieldEqualsValueExpression, ConditionValueExpression
-from sigma.types import SigmaCompareExpression, SigmaString, SigmaNumber
-#from sigma.pipelines.sumologic import sumologic# TODO: add pipeline imports or delete this line
-from sigma.conversion.deferred import DeferredQueryExpression, DeferredTextQueryExpression
 import sigma
 import re
 import json
+from sigma.rule import SigmaRule, SigmaDetectionItem
+from sigma.conversion.state import ConversionState
+from sigma.conversion.base import TextQueryBackend
+from sigma.conditions import ConditionItem, ConditionAND, ConditionOR, ConditionNOT, ConditionFieldEqualsValueExpression, ConditionValueExpression
+from sigma.types import SigmaCompareExpression, SigmaString, SigmaNumber
+from sigma.processing.pipeline import ProcessingPipeline
+from sigma.pipelines.sumologic import sumologic_cip_pipeline
+from sigma.conversion.deferred import DeferredQueryExpression, DeferredTextQueryExpression
 from typing import ClassVar, Dict, Tuple, Pattern, List, Any, Union
 from sigma.backends.sumologic.parsing import parsing_statement_config
 
@@ -33,6 +34,9 @@ class SumoLogicMultiDeferredKeywordExpression(DeferredTextQueryExpression):
 
 class sumologicCIPBackend(TextQueryBackend):
     """SumoLogic CIP Backend."""
+
+    # add pipeline
+    backend_processing_pipeline : ClassVar[ProcessingPipeline] = sumologic_cip_pipeline()
 
     # TOKEN DEFINITIONS
 
@@ -490,7 +494,7 @@ class sumologicCIPBackend(TextQueryBackend):
         Finalize query by appending deferred query parts to the main conversion result as specified
         with deferred_start and deferred_separator.
         """
-        rule_fields = self.get_all_fields_from_rule_new(rule)["detection_fields"]
+        rule_fields = sorted(self.get_all_fields_from_rule_new(rule)["detection_fields"])
         source_category = self.get_source_category(rule, state)
         parsing_statements = self.get_parsing_statements(rule)
         # add scope/keywords
@@ -523,12 +527,12 @@ class sumologicCIPBackend(TextQueryBackend):
     def finalize_query_saved_search(self, rule : SigmaRule, query : Union[str, DeferredQueryExpression], index : int, state : ConversionState) -> Union[str, DeferredQueryExpression]:
         name = rule.title
         query_text = query
-        description = rule.description
+        description = rule.description if rule.description else ""
         saved_search = {
             "type": "SavedSearchWithScheduleSyncDefinition",
             "name": name,
             "search": {
-                "queryText": query,
+                "queryText": query_text,
                 "defaultTimeRange": "Last 60 Minutes",
 		"byReceiptTime": False,
 		"viewName": "",

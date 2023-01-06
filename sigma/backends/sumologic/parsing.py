@@ -247,6 +247,16 @@ parsing_statement_config = {
         "source_name": """| json "EventData.Data[17]" as source_name""",
         "value": """| json "EventData.Value" as value"""
     },
+    "sumologic_cip_powershell_fieldmapping": {
+        "context_info": """| json "EventData.ContextInfo" as context_info""",
+        "engine_version": r"""| parse "EngineVersion=*\\r" as engine_version""",
+        "host_application": """| parse "HostApplication=* " as host_application""",
+        "host_name": r"""| parse "HostName=*\\r" as host_name""",
+        "host_version": r"""| parse "HostVersion=*\\r" as host_version""",
+        "payload": """| json "EventData.Payload" as payload""",
+        "script_path": """| json "EventData.Path" as script_path""",
+        "script_block": """| json "EventData.ScriptBlockText" as script_block"""
+    },
     "sumologic_cip_alt_windows_fieldmapping": {
         "local_name": """| json "EventData.LocalName" as local_name""",
         "remote_name": """| json "EventData.RemoteName" as remote_name""",

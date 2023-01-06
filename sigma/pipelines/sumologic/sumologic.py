@@ -4,7 +4,7 @@ from sigma.processing.conditions import LogsourceCondition, IncludeFieldConditio
 from sigma.processing.pipeline import ProcessingItem, ProcessingPipeline
 from sigma.pipelines.common import *
 
-sysmon_generic_logsource_eventid_mapping = {
+sysmon_generic_logsource_eventid_mapping = {    # map generic Sigma log sources to Sysmon event ids
     "process_creation": 1,
     "file_change": 2,
     "network_connection": 3,
@@ -82,6 +82,20 @@ linux_sysmon_conditions = [
         product="linux"
     )
     for item in sysmon_generic_logsource_eventid_mapping
+]
+
+ps_categories = [
+    "ps_classic_start",
+    "ps_module",
+    "ps_script"
+]
+
+powershell_logsource_conditions = [
+    LogsourceCondition(
+        product="windows",
+        category=cat
+    )
+    for cat in ps_categories
 ]
 
 def logsource_antivirus() -> LogsourceCondition:
@@ -195,9 +209,20 @@ def logsource_webserver() -> LogsourceCondition:
 
 def sumologic_cip_pipeline() -> ProcessingPipeline:
     return ProcessingPipeline(
-        name="Generic Log Sources to SumoLogic CIP Transformation",
+        name="SumoLogic CIP Processing Pipeline",
         priority=10,
         items=[
+            # prohibit field names with spaces
+            ProcessingItem(
+                identifier="sumologic_cip_fail_space_in_field_name",
+                transformation=DetectionItemFailureTransformation("The SumoLogic backend does not permit spaces in field names."),
+                field_name_conditions=[
+                    IncludeFieldCondition(
+                        fields=[r".*\ .*"],
+                        type="re"
+                    )
+                ],
+            ),
             # antivirus field mapping
             ProcessingItem(
                 identifier="sumologic_cip_antivirus_fieldmapping",
@@ -708,6 +733,37 @@ def sumologic_cip_pipeline() -> ProcessingPipeline:
                 }),
                 rule_conditions=[
                     logsource_windows_defender()
+                ]
+            ),
+            # windows powershell
+            ProcessingItem(
+                identifier="sumologic_cip_powershell_fieldmapping",
+                transformation=FieldMappingTransformation({
+                    "ContextInfo": "context_info",
+                    "EngineVersion": "engine_version",
+                    "HostApplication": "host_application",
+                    "HostName": "host_name",
+                    "HostVersion": "host_version",
+                    "Payload": "payload",
+                    "Path": "script_path",
+                    "ScriptBlockText": "script_block"
+                }),
+                rule_conditions=powershell_logsource_conditions,
+                rule_condition_linking=any
+            ),
+            # unsupported powershell field
+            ProcessingItem(
+                identifier="sumologic_cip_fail_powershell_fields",
+                transformation=DetectionItemFailureTransformation("The ParentImage and CommandLine fields are not supported for Powershell rules (did you mean to use them in a Process Creation rule?)."),
+                rule_conditions=powershell_logsource_conditions,
+                rule_condition_linking=any,
+                field_name_conditions=[
+                    IncludeFieldCondition(
+                        fields=[
+                            "ParentImage",
+                            "CommandLine"
+                        ]
+                    )
                 ]
             ),
             # alternative windows log source field mapping
