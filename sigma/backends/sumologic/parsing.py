@@ -17,9 +17,6 @@ parsing_statement_config = {
         "product": """| json "EventData.Product" as product""",
         "company": """| json "EventData.Company" as company""",
         "process_path": """| json "EventData.Image" as process_path""",
-        "parent_process_path": """| json "EventData.ParentImage" as parent_process_path""",
-        "command_line": """| json "EventData.CommandLine" as command_line""",
-        "parent_command_line": """| json "EventData.ParentCommandLine" as parent_command_line""",
         "process_hash_md5": "| parse regex \"MD5=(?<process_hash_md5>.*?)(?:\,|$)\"",
         "process_hash_sha1": "| parse regex \"SHA1=(?<process_hash_sha1>.*?)(?:\,|$)\"",
         "process_hash_sha256": "| parse regex \"SHA256=(?<process_hash_sha256>.*?)(?:\,|$)\"",
@@ -39,6 +36,7 @@ parsing_statement_config = {
         "terminal_session_id": """| json "EventData.TerminalSessionId" as terminal_session_id""",
         "integrity_level": """| json "EventData.IntegrityLevel" as integrity_level""",
         "parent_process_guid": """| json "EventData.ParentProcessGuid" as parent_process_guid""",
+        "command_line": """| json "EventData.CommandLine" as command_line""",
         "parent_process_id": """| json "EventData.ParentProcessId" as parent_process_id""",
         "parent_process_path": """| json "EventData.ParentImage" as parent_process_path""",
         "parent_command_line": """| json "EventData.ParentCommandLine" as parent_command_line"""
