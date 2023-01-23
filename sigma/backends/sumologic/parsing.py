@@ -192,7 +192,7 @@ parsing_statement_config = {
         "service_type": """| json "EventData.ServiceType" as service_type""",
         "share_name": """| json "EventData.ShareName" as share_name""",
         "sid_history": """| json "EventData.SidHistory" as sid_history""",
-        "src_ip": """| json "EventData.SourceAddress" as src_ip""",
+        "src_address": """| json "EventData.SourceAddress" as src_address""",
         "src_port": """| json "EventData.SourcePort" as src_port""",
         "status": """| json "EventData.Status" as status""",
         "src_user_domain": """| json "EventData.SubjectDomainName" as src_user_domain""",
@@ -212,8 +212,8 @@ parsing_statement_config = {
         "template_content": """| json "EventData.TemplateContent" as template_content""",
         "ticket_encryption": """| json "EventData.TicketEncryptionType" as ticket_encryption""",
         "ticket_options": """| json "EventData.TicketOptions" as ticket_options""",
-        "src_host": """| json "EventData.Workstation" as src_host""",
-        "src_hostname": """| json "EventData.WorkstationName" as src_hostname"""
+        "src_host": """| json "EventData.Workstation" as src_host nodrop""",
+        "src_hostname": """| json "EventData.WorkstationName" as src_hostname nodrop"""
     },
     "sumologic_cip_windows_application_fieldmapping": {
         "app_name": """| json "EventData.Data[0]" as app_name""",
@@ -284,7 +284,8 @@ parsing_statement_config = {
         "smb_server_name": """| json "EventData.ServerName" as smb_server_name""",
         "smb_share_name": """| json "EventData.ShareName" as smb_share_name""",
         "schtask_name": """| json "EventData.TaskName" as schtask_name""",
-        "schtask_path": """| json "EventData.Path" as schtask_path""",
+        "path": """| json "EventData.Path" as path""",
+        "package_full_name": """| json "EventData.PackageFullName" as package_full_name""",
         "address": """| json "EventData.Address" as address""",
         "wmi_event_provider": """| json "EventData.Provider" as wmi_event_provider""",
         "wmi_query": """| json "EventData.Query" as wmi_query""",
@@ -317,7 +318,6 @@ parsing_statement_config = {
         "auth_requirement": """| json "properties.authenticationRequirement" as auth_requirement""",
         "category": """| json "properties.category" as category""",
         "category_value": """| json "category" as category_value""",
-        "client_app": """| json "properties.targetResources[0].modifiedProperties[0].displayName", "properties.targetResources[0].modifiedProperties[0].newValue" as modified_property, new_val | if(modified_property = "ConsentContext.IsAdminConsent", "admin_consent", "nothing") as tmp | if(new_val = "False" and tmp = "admin_consent", "false", "N/A") as is_admin_consent""",
         "admin_consent": """| json "ConsentContext.IsAdminConsent" as admin_consent""",
         "count": """| json "Count" as count""",
         "device_id": """| json "properties.deviceDetail.deviceId" as deviceId""",

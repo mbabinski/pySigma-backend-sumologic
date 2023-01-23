@@ -1,13 +1,14 @@
 import sigma
 import re
 import json
+import sqlparse
 from sigma.rule import SigmaRule, SigmaDetectionItem
 from sigma.conversion.state import ConversionState
 from sigma.conversion.base import TextQueryBackend
 from sigma.conditions import ConditionItem, ConditionAND, ConditionOR, ConditionNOT, ConditionFieldEqualsValueExpression, ConditionValueExpression
 from sigma.types import SigmaCompareExpression, SigmaString, SigmaNumber
 from sigma.processing.pipeline import ProcessingPipeline
-from sigma.pipelines.sumologic import sumologic_cip_pipeline
+from sigma.pipelines.sumologic import sumologic_cip_pipeline, sumologic_cse_pipeline
 from sigma.conversion.deferred import DeferredQueryExpression, DeferredTextQueryExpression
 from typing import ClassVar, Dict, Tuple, Pattern, List, Any, Union
 from sigma.backends.sumologic.parsing import parsing_statement_config
@@ -45,7 +46,7 @@ class sumologicCIPBackend(TextQueryBackend):
 
     # order of precedence
     precedence : ClassVar[Tuple[ConditionItem, ConditionItem, ConditionItem]] = (ConditionNOT, ConditionAND, ConditionOR)
-
+    
     # grouping convention
     group_expression : ClassVar[str] = "({expr})"   # Expression for precedence override grouping as format string with {expr} placeholder
 
@@ -80,6 +81,7 @@ class sumologicCIPBackend(TextQueryBackend):
     escape_char     : ClassVar[str] = "\\"    # Escaping character for special characrers inside string
     wildcard_multi  : ClassVar[str] = "*"     # Character used as multi-character wildcard
     wildcard_single : ClassVar[str] = "*"     # Character used as single-character wildcard
+    wildcard_default : ClassVar[str] = "*"
     add_escaped     : ClassVar[str] = "\\"    # Characters quoted in addition to wildcards and string quote
     filter_chars    : ClassVar[str] = ""      # Characters filtered
     bool_values     : ClassVar[Dict[bool, str]] = {   # Values to which boolean values are mapped.
@@ -121,7 +123,7 @@ class sumologicCIPBackend(TextQueryBackend):
     list_separator : ClassVar[str] = ", "               # List element separator
 
     # not equals expression
-    not_expression : ClassVar[str] = "!({expression})"
+    not_expression : ClassVar[str] = "!{expression}"
     keyword_not_expression : ClassVar[str] = "NOT ({expression})"
 
     # keyword search expressions
@@ -184,12 +186,7 @@ class sumologicCIPBackend(TextQueryBackend):
             else:
                 if any(isinstance(arg.value, SigmaString) for arg in args):
                     field=self.to_lower_case_expression.format(field=self.escape_and_quote_field(cond.args[0].field))
-                # event IDs must have quotes
-                if field == "event_id":
-                    vals = vals_formatted2
-                else:
-                    vals = self.list_separator.join([self.convert_value_str(arg.value, state).lower() if isinstance(arg.value, SigmaString) else str(arg.value) for arg in cond.args])
-                result = self.field_in_list_expression.format(field=field, op=self.or_in_operator, list=vals)
+                result = self.field_in_list_expression.format(field=field, op=self.or_in_operator, list=vals_formatted2)
         else:
             # contains all
             result = self.generate_contains_all_exp(field, escaped_vals)
@@ -355,17 +352,9 @@ class sumologicCIPBackend(TextQueryBackend):
     def convert_condition_field_eq_val_cidr(self, cond : ConditionFieldEqualsValueExpression, state : ConversionState) -> Union[str, DeferredQueryExpression]:
         """Conversion of field matches CIDR value expressions."""
         cidr : SigmaCIDRExpression = cond.value
-        if self.cidr_expression is not None:        # native CIDR support from backend with expression templates.
-            addr = self.str_quote + str(cidr.network.network_address) + self.str_quote
-            prefix_length = self.str_quote + str(cidr.network.prefixlen) + self.str_quote
-            return self.cidr_expression.format(field=cond.field, addr=addr, prefix_length=prefix_length)
-        else:                                       # No native CIDR support: expand into string wildcard matches on prefixes.
-            expanded = cidr.expand(self.wildcard_multi)
-            expanded_cond = ConditionOR([
-                ConditionFieldEqualsValueExpression(cond.field, SigmaString(network))
-                for network in expanded
-            ], cond.source)
-            return self.convert_condition(expanded_cond, state)
+        addr = self.str_quote + str(cidr.network.network_address) + self.str_quote
+        prefix_length = self.str_quote + str(cidr.network.prefixlen) + self.str_quote
+        return self.cidr_expression.format(field=cond.field, addr=addr, prefix_length=prefix_length)
 
     def convert_condition_val_str(self, cond : ConditionValueExpression, state : "sigma.conversion.state.ConversionState") -> SumoLogicSingleDeferredKeywordExpression:
         """Conversion of value-only strings."""
@@ -484,7 +473,7 @@ class sumologicCIPBackend(TextQueryBackend):
                     parsing_statements.append(parsing_statements_dict[field])
 
         if len(parsing_statements) > 0:
-            return parsing_statements
+            return sorted(list(set(parsing_statements)))
         else:
             return None
         
@@ -552,4 +541,315 @@ class sumologicCIPBackend(TextQueryBackend):
         return self.finalize_output_default(queries)
     
 
+class sumologicCSEBackend(TextQueryBackend):
+    """SumoLogic CSE Backend."""
 
+    # add pipeline
+    backend_processing_pipeline : ClassVar[ProcessingPipeline] = sumologic_cse_pipeline()
+
+    # TOKEN DEFINITIONS
+
+    # backend name
+    name : ClassVar[str] = "Sumologic CSE Backend"
+
+    # order of precedence
+    precedence : ClassVar[Tuple[ConditionItem, ConditionItem, ConditionItem]] = (ConditionNOT, ConditionAND, ConditionOR)
+
+    # grouping convention
+    group_expression : ClassVar[str] = "({expr})"   # Expression for precedence override grouping as format string with {expr} placeholder
+
+    # query tokens
+    token_separator : str = " "     # separator inserted between all boolean operators
+    or_token : ClassVar[str] = "OR"
+    and_token : ClassVar[str] = "AND"
+    not_token : ClassVar[str] = "NOT"
+    keyword_not_token : ClassVar[str] = "NOT"
+    not_eq_token : ClassVar[str] = "<>"
+    eq_token : ClassVar[str] = "="
+    like : ClassVar[str] = "LIKE"
+    rlike : ClassVar[str] = "RLIKE"
+
+    # field quoting definition
+    field_quote : ClassVar[str] = "'"                               # Character used to quote field characters if field_quote_pattern matches (or not, depending on field_quote_pattern_negation). No field name quoting is done if not set.
+    field_quote_pattern : ClassVar[Pattern] = re.compile("^\\w+$")   # Quote field names if this pattern (doesn't) matches, depending on field_quote_pattern_negation. Field name is always quoted if pattern is not set.
+    field_quote_pattern_negation : ClassVar[bool] = True            # Negate field_quote_pattern result. Field name is quoted if pattern doesn't matches if set to True (default).
+
+    # escaping definition
+    field_escape : ClassVar[str] = "\\"               # Character to escape particular parts defined in field_escape_pattern.
+    field_escape_quote : ClassVar[bool] = True        # Escape quote string defined in field_quote
+    field_escape_pattern : ClassVar[Pattern] = re.compile("\\s")   # All matches of this pattern are prepended with the string contained in field_escape.
+
+    # to lower case expression (to make outputs case insensitive)
+    to_lower_case_expression : ClassVar[str] = "lower({field})"
+
+    # value definitions
+    str_double_quote : ClassVar[str] = '"'
+    str_single_quote : ClassVar[str] = "'"
+    str_triple_quote : ClassVar[str] = '"""'
+    str_quote       : ClassVar[str] = "'"     # string quoting character (added as escaping character)
+    escape_char     : ClassVar[str] = "\\"    # Escaping character for special characrers inside string
+    wildcard_multi  : ClassVar[str] = "%"     # Character used as multi-character wildcard
+    wildcard_single : ClassVar[str] = "_"     # Character used as single-character wildcard
+    wildcard_default : ClassVar[str] = "*"
+    add_escaped     : ClassVar[str] = "\\"    # Characters quoted in addition to wildcards and string quote
+    filter_chars    : ClassVar[str] = ""      # Characters filtered
+    bool_values     : ClassVar[Dict[bool, str]] = {   # Values to which boolean values are mapped.
+        True: "True",
+        False: "False",
+    }
+
+    # regular expression definitions
+    re_expression : ClassVar[str] = "{field} RLIKE '{regex}'"  # Regular expression query as format string with placeholders {field} and {regex}
+    re_escape_char : ClassVar[str] = "\\"               # Character used for escaping in regular expressions
+    re_escape : ClassVar[Tuple[str]] = ('"', '/')               # List of strings that are escaped
+
+    # cidr expressions
+    cidr_wildcard : ClassVar[str] = "*"    # Character used as single wildcard
+    cidr_expression : ClassVar[str] = "compareCIDRPrefix({field}, {addr}, {prefix_length})"    # CIDR expression query as format string with placeholders {field} = {value}
+    cidr_in_list_expression : ClassVar[str] = "{field} in ({value})"    # CIDR expression query as format string with placeholders {field} = in({list})
+
+    # numeric comparison operators
+    compare_op_expression : ClassVar[str] = "{field} {operator} {value}"  # Compare operation query as format string with placeholders {field}, {operator} and {value}
+    # Mapping between CompareOperators elements and strings used as replacement for {operator} in compare_op_expression
+    compare_operators : ClassVar[Dict[SigmaCompareExpression.CompareOperators, str]] = {
+        SigmaCompareExpression.CompareOperators.LT  : "<",
+        SigmaCompareExpression.CompareOperators.LTE : "<=",
+        SigmaCompareExpression.CompareOperators.GT  : ">",
+        SigmaCompareExpression.CompareOperators.GTE : ">=",
+    }
+
+    # null, blank, and empty expressions
+    field_null_expression : ClassVar[str] = "isNull({field})" # value is null
+    field_blank_expression : ClassVar[str] = "isBlank({field})" # value is null, empty, or contains only whitespace characters
+    field_empty_expression : ClassVar[str] = "isEmpty({field})" # value is an empty string containing no characters or whitespace
+
+    # field value in list
+    convert_or_as_in : ClassVar[bool] = True                     # Convert OR as in-expression
+    convert_and_as_in : ClassVar[bool] = True                    # Convert AND as in-expression
+    in_expressions_allow_wildcards : ClassVar[bool] = True       # Values in list can contain wildcards. If set to False (default) only plain values are converted into in-expressions.
+    field_in_list_expression : ClassVar[str] = "{field} {op} ({list})"  # Expression for field in list of values as format string with placeholders {field}, {op} and {list}
+    or_in_operator : ClassVar[str] = "IN"               # Operator used to convert OR into in-expressions. Must be set if convert_or_as_in is set
+    list_separator : ClassVar[str] = ", "               # List element separator
+
+    # not equals expression
+    not_expression : ClassVar[str] = "!({expression})"
+    keyword_not_expression : ClassVar[str] = "NOT ({expression})"
+
+    # keyword search expressions
+    unbound_value_str_expression : ClassVar[str] = "_raw LIKE '%{value}%'"     # Expression for string value not bound to a field as format string with placeholder {value}
+    unbound_value_num_expression : ClassVar[str] = "_raw LIKE '%{value}%'"   # Expression for number value not bound to a field as format string with placeholder {value}
+
+    def get_quote_type(self, val):
+            """Returns the shortest correct quote type (none, single, double, or trip) based on quote characters contained within an input value"""
+            if type(val) != str:
+                quote = ""
+            elif '"' and "'" in val:
+                quote = self.str_triple_quote
+            elif '"' in val:
+                quote = self.str_single_quote
+            else:
+                quote = self.str_double_quote
+
+            return quote
+    
+    def generate_contains_any_exp(self, field, vals):
+        values_string = "|".join(vals).lower()
+        field = self.to_lower_case_expression.format(field=field)
+        return field + self.token_separator + self.rlike + self.token_separator + "'^.*({}).*$'".format(values_string)
+
+    def generate_contains_all_exp(self, field, vals):
+        values_string = "'^.*(?=.*" + ")(?=.*".join(vals) + ").*$'".lower()
+        field = self.to_lower_case_expression.format(field=field)
+        return field + self.token_separator + self.rlike + self.token_separator + values_string
+
+    def generate_startswith_any_exp(self, field, vals):
+        values_string = "|".join(vals).lower()
+        field = self.to_lower_case_expression.format(field=field)
+        return field + self.token_separator + self.rlike + self.token_separator + "'^({}).*$'".format(values_string)
+
+    def generate_endswith_any_exp(self, field, vals):
+        values_string = "|".join(vals).lower()
+        field = self.to_lower_case_expression.format(field=field)
+        return field + self.token_separator + self.rlike + self.token_separator + "'^.*({})$'".format(values_string)
+
+    def convert_condition_field_eq_val_str(self, cond : ConditionFieldEqualsValueExpression, state : ConversionState) -> Union[str, DeferredQueryExpression]:
+        """Conversion of field = string value expressions"""
+        #print(cond.parent.modifiers[0])
+        field = cond.field
+        test_val = cond.value.to_plain().lower()
+        val = self.convert_value_str(cond.value, state).lower()
+        val = self.str_quote + test_val.replace(self.wildcard_default, self.wildcard_multi) + self.str_quote
+        # contains
+        if test_val.startswith(self.wildcard_default) and test_val.endswith(self.wildcard_default):
+            result = self.to_lower_case_expression.format(field=cond.field) + self.token_separator + self.like + self.token_separator + val
+        # startswith or endswith
+        elif test_val.endswith(self.wildcard_default) or test_val.startswith(self.wildcard_default):
+            result = self.to_lower_case_expression.format(field=cond.field) + self.token_separator + self.like + self.token_separator + val
+        # blank
+        elif test_val.strip() == "":
+            result = self.field_blank_expression.format(field=cond.field)
+        # plain equals
+        else:
+            result = self.to_lower_case_expression.format(field=cond.field) + self.token_separator + self.eq_token + self.token_separator + val
+
+        return result
+
+    def convert_condition_field_eq_val_num(self, cond : ConditionFieldEqualsValueExpression, state : ConversionState) -> Union[str, DeferredQueryExpression]:
+        """Conversion of field = number value expressions"""
+        try:
+            return cond.field + self.token_separator + self.eq_token + self.token_separator + str(cond.value)
+            #return self.escape_and_quote_field(cond.field)+ self.token_separator + self.eq_token + self.token_separator + str(cond.value)
+        except TypeError:       # pragma: no cover
+            raise NotImplementedError("Field equals numeric value expressions are not supported by the backend.")
+
+    def convert_condition_field_eq_val_re(self, cond : ConditionFieldEqualsValueExpression, state : ConversionState) -> Union[str, DeferredQueryExpression]:
+        """Conversion of field matches regular expression value expressions."""
+        regexp = self.convert_value_re(cond.value, state).replace("A-Z", "a-z")
+        field = cond.field
+        result = self.re_expression.format(
+                 field=self.to_lower_case_expression.format(field=cond.field),
+                 regex=regexp
+             )
+        
+        return result
+
+    def convert_condition_as_in_expression(self, cond : Union[ConditionOR, ConditionAND], state : ConversionState) -> Union[str, DeferredQueryExpression]:
+        """Conversion of field in value list conditions."""
+        args = cond.args
+        # retrieve field
+        field=cond.args[0].field
+        # retrieve values and pre-process for use below
+        vals = [str(arg.value.to_plain() or "") for arg in cond.args]
+        vals2 = [arg.value.to_plain() for arg in cond.args]
+        test_val = vals[0]
+        test_val2 = vals2[0]
+        vals_no_wc = [val.rstrip(self.wildcard_default).lstrip(self.wildcard_default) for val in vals]
+        escaped_vals = [re.escape(val).replace("/", "\\/") for val in vals_no_wc]
+        vals_formatted2 = self.list_separator.join([self.str_quote + v.lower() + self.str_quote if isinstance(v, str) else str(v) for v in vals_no_wc])
+                
+        # or-in condition
+        if isinstance(cond, ConditionOR):
+            # contains any
+            if test_val.startswith(self.wildcard_default) and test_val.endswith(self.wildcard_default):
+                result = self.generate_contains_any_exp(field, escaped_vals)
+            # startswith any
+            elif test_val.endswith(self.wildcard_default) and not test_val.startswith(self.wildcard_default):
+                result = self.generate_startswith_any_exp(field, escaped_vals)
+            # endswith any
+            elif test_val.startswith(self.wildcard_default) and not test_val.endswith(self.wildcard_default):
+                result = self.generate_endswith_any_exp(field, escaped_vals)
+            # in
+            else:
+                if any(isinstance(arg.value, SigmaString) for arg in args):
+                    field=self.to_lower_case_expression.format(field=field)
+                result = self.field_in_list_expression.format(field=field, op=self.or_in_operator, list=vals_formatted2)
+        else:
+            # contains all
+            result = self.generate_contains_all_exp(field, escaped_vals)
+
+        return result
+
+    def convert_condition_field_eq_val_cidr(self, cond : ConditionFieldEqualsValueExpression, state : ConversionState) -> Union[str, DeferredQueryExpression]:
+        """Conversion of field matches CIDR value expressions."""
+        cidr : SigmaCIDRExpression = cond.value
+        addr = self.str_quote + str(cidr.network.network_address) + self.str_quote
+        prefix_length = self.str_quote + str(cidr.network.prefixlen) + self.str_quote
+        return self.cidr_expression.format(field=cond.field, addr=addr, prefix_length=prefix_length)
+
+    def convert_condition_val_str(self, cond : ConditionValueExpression, state : ConversionState) -> Union[str, DeferredQueryExpression]:
+        """Conversion of value-only strings."""
+        return self.unbound_value_str_expression.format(value=cond.value)
+
+    def finalize_query(self, rule : SigmaRule, query : Union[str, DeferredQueryExpression], index : int, state : ConversionState, output_format : str) -> Union[str, DeferredQueryExpression]:
+        """
+        Finalize query by appending deferred query parts to the main conversion result as specified
+        with deferred_start and deferred_separator.
+        """
+        statement = sqlparse.split(query)[0]
+
+        finalized_query = sqlparse.format(statement, reindent=True, wrap_after=False, keyword_case='upper')
+
+        return super().finalize_query(rule, finalized_query, index, state, output_format)
+
+    def finalize_query_cse_rule(self, rule : SigmaRule, query : Union[str, DeferredQueryExpression], index : int, state : ConversionState) -> Union[str, DeferredQueryExpression]:
+        tactics_mapping = {
+            "reconnaissance": "_mitreAttackTactic:TA0043",
+            "resource_development": "_mitreAttackTactic:TA0042",
+            "initial_access": "_mitreAttackTactic:TA0001",
+            "execution": "_mitreAttackTactic:TA0002",
+            "persistence": "_mitreAttackTactic:TA0003",
+            "privilege_escalation": "_mitreAttackTactic:TA0004",
+            "defense_evasion": "_mitreAttackTactic:TA0005",
+            "credential_access": "_mitreAttackTactic:TA0006",
+            "discovery": "_mitreAttackTactic:TA0007",
+            "lateral_movement": "_mitreAttackTactic:TA0008",
+            "collection": "_mitreAttackTactic:TA0009",
+            "exfiltration": "_mitreAttackTactic:TA0010",
+            "command_and_control": "_mitreAttackTactic:TA0011",
+            "impact": "_mitreAttackTactic:TA0040",
+        }
+        severity_mapping = {
+            "informational": 0,
+            "low": 2,
+            "medium": 4,
+            "high": 6,
+            "critical": 8
+        }
+        # name and other rule elements
+        name = rule.title
+        description = rule.description + " " if rule.description else ""
+        if rule.author and rule.date:
+            desc = description + "Authored by " + rule.author + " on " + rule.date.strftime("%x") + "."
+        else:
+            desc = description
+        if rule.level:
+            severity_score = severity_mapping[rule.level.name.lower()]
+        else:
+            severity_score = 0
+        # tags
+        tags = []
+        for tag in rule.tags:
+            if tag.namespace == "attack":
+                if tag.name in tactics_mapping.keys():
+                    tags.append(tactics_mapping[tag.name])
+                elif tag.name.lower().startswith("t"):
+                    tags.append("_mitreAttackTechnique:" + tag.name.upper())
+                else:
+                    tags.append(tag.name)
+            else:
+                tags.append(tag.name)
+        if rule.logsource.product:
+            tags.append(rule.logsource.product)
+        if rule.logsource.service:
+            tags.append(rule.logsource.service)
+        if rule.logsource.category:
+            tags.append(rule.logsource.category)
+
+        # define the rule   
+        cse_rule = {
+            "assetField": "device_hostname",
+            "category": "Unknown/Other",
+            "descriptionExpression": desc,
+            "enabled": True,
+            "entitySelectors": [{"entityType": "_hostname",
+                                 "expression": "device_hostname"}],
+            "expression": query,
+            "isPrototype": True,
+            "name": name,
+            "nameExpression": name,
+            "ruleType": "match",
+            "scoreMapping": {"default": severity_score,
+                             "field": None,
+                             "mapping": None,
+                             "type": "constant"},
+            "summaryExpression": "",
+            "stream": "record",
+            "tags": tags
+            }
+
+        result = json.dumps(cse_rule, indent=4)
+
+        return result
+    
+    def finalize_output_cse_rule(self, queries: List[str]) -> List[str]:
+        return self.finalize_output_default(queries)
