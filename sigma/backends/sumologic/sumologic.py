@@ -123,7 +123,7 @@ class sumologicCIPBackend(TextQueryBackend):
     list_separator : ClassVar[str] = ", "               # List element separator
 
     # not equals expression
-    not_expression : ClassVar[str] = "!{expression}"
+    not_expression : ClassVar[str] = "!({expression})"
     keyword_not_expression : ClassVar[str] = "NOT ({expression})"
 
     # keyword search expressions
